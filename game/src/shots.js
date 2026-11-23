@@ -1,98 +1,119 @@
-// The screenshot scenes behind ?shot=title|table|win|loss. Each one plays the real rules
-// forward from a fresh duel for a fixed number of rounds, steered by a simple autopilot,
-// so the frame is what a short game really looks like and the same seed always gives the
-// same frame. The win scene's pilot plays boldly and the loss scene's plays passively —
-// the way a hurried player and a careless one do — and the table scene stops mid-duel in
-// round four, both hands full and both life bars marked.
-import { PHASE_AI, PHASE_LOST, PHASE_PLAYER, PHASE_WON } from './duel.js';
-import { SCREEN_LOST, SCREEN_PLAY, SCREEN_TITLE, SCREEN_WON } from './render.js';
+// Staged screenshot scenes for `?shot=title|table|win|loss&seed=N`. Every
+// scene is built by playing the real duel with the seeded RNG — no hand-made
+// pixels — so a screenshot is a true render of the game's own code.
+// The table scene is staged to show the Resonance hint: the player has just
+// played a card, and a card of the same suit is still in hand, so the gold
+// ring and the "✦ RESONANCE" tag are on screen.
+import { createGame, playCard, endPlayerTurn, dealDamage } from './duel.js';
 
-/**
- * The autopilot's taste in cards. A bold pilot chases damage; a passive one never attacks
- * and only mends and shields, which is how a duel is lost.
- */
-function cardValue(duel, index, bold) {
-  const state = duel.state;
-  const cardValue = state.you.hand[index];
-  if (cardValue === undefined || cardValue.cost > state.you.ember) return -1;
-  const resonance = state.you.lastSuit === cardValue.suit ? 2 : 0;
-  const power = cardValue.power + resonance;
-  if (cardValue.suit === 'flame') return bold ? power + 4 : -1;
-  if (cardValue.suit === 'gale') return bold ? power + 3 : -1;
-  if (cardValue.suit === 'tide') return state.you.hp < 30 ? power + (bold ? 0 : 5) : -1;
-  return power * 0.8 + (bold ? 0 : 2);
+function affordable(state, side) {
+  const list = [];
+  state[side].hand.forEach((card, i) => {
+    if (card.cost <= state[side].ember) list.push(i);
+  });
+  return list;
 }
 
-/** Play the player's turn with the autopilot, up to four cards, then end it. */
-function autoPlayerTurn(duel, bold) {
-  let played = 0;
-  while (played < 4 && duel.state.phase === PHASE_PLAYER) {
-    let best = -1;
-    let bestValue = 0;
-    for (let index = 0; index < duel.state.you.hand.length; index += 1) {
-      const value = cardValue(duel, index, bold);
-      if (value > bestValue) {
-        bestValue = value;
-        best = index;
-      }
-    }
-    if (best === -1) break;
-    duel.playCard(best);
-    played += 1;
+/** Prefer a card that chains the current suit, else the cheapest affordable. */
+function pickChainCard(state) {
+  const options = affordable(state, 'you');
+  if (options.length === 0) return -1;
+  const chained = options.filter((i) => state.you.hand[i].suit === state.you.lastSuit);
+  const pool = chained.length > 0 ? chained : options;
+  let best = pool[0];
+  for (const i of pool) {
+    if (state.you.hand[i].cost < state.you.hand[best].cost) best = i;
   }
-  if (duel.state.phase === PHASE_PLAYER) duel.endTurn();
-  if (duel.state.phase === PHASE_AI) duel.aiTakeTurn();
+  return best;
 }
 
-/** Play whole rounds until `stop` says the scene is ready, or the duel ends, or 40 rounds pass. */
-function playUntil(duel, bold, stop) {
-  for (let round = 0; round < 40; round += 1) {
-    if (duel.state.phase === PHASE_WON || duel.state.phase === PHASE_LOST) return;
-    if (stop(duel)) return;
-    if (duel.state.phase === PHASE_PLAYER) autoPlayerTurn(duel, bold);
-    else if (duel.state.phase === PHASE_AI) duel.aiTakeTurn();
+/** The hardest-hitting affordable card (Flame and Gale first). */
+function pickDamageCard(state) {
+  const options = affordable(state, 'you');
+  if (options.length === 0) return -1;
+  let best = options[0];
+  for (const i of options) {
+    const card = state.you.hand[i];
+    const bestCard = state.you.hand[best];
+    const damage = (c) => (c.suit === 'flame' || c.suit === 'gale' ? c.power : 0);
+    const score = (c) => damage(c) * 10 + (c.suit === state.you.lastSuit ? 5 : 0) - c.cost;
+    if (score(card) > score(bestCard)) best = i;
   }
+  return best;
 }
 
-/**
- * Set `duel` to the named scene (title, table, win or loss; any other name is title) and
- * return the screen to draw over it.
- */
-export function stageShot(name, duel) {
-  if (name === 'table') {
-    duel.startDuel();
-    playUntil(duel, true, (d) => d.state.phase === PHASE_PLAYER && d.state.round >= 4);
-    // Play one card first: startRound() resets lastSuit, so a frame stopped right
-    // at the round's start would have no Resonance hint to show. Prefer a card
-    // whose suit still sits in the hand afterwards, so the gold ring lands on a
-    // real card and the frame shows the rule in action.
-    if (duel.state.phase === PHASE_PLAYER) {
-      const hand = duel.state.you.hand;
-      const counts = {};
-      for (const card of hand) counts[card.suit] = (counts[card.suit] ?? 0) + 1;
-      let pick = -1;
-      for (let i = 0; i < hand.length; i += 1) {
-        if (hand[i].cost <= duel.state.you.ember && counts[hand[i].suit] >= 2) { pick = i; break; }
-      }
-      if (pick === -1) {
-        for (let i = 0; i < hand.length; i += 1) {
-          if (hand[i].cost <= duel.state.you.ember) { pick = i; break; }
+function buildTable(seed) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const state = createGame(seed + attempt * 1000);
+    for (let round = 0; round < 40 && state.phase !== 'over'; round++) {
+      // Play cards until a same-suit card is left in hand: the hint shows.
+      for (;;) {
+        const pick = pickChainCard(state);
+        if (pick === -1) break;
+        playCard(state, 'you', pick);
+        if (state.phase === 'over') break;
+        if (state.you.hand.some((c) => c.suit === state.you.lastSuit)) {
+          return {
+            state,
+            announce: { text: '✦ RESONANCE +2 ✦', until: Number.POSITIVE_INFINITY },
+          };
         }
       }
-      if (pick !== -1) duel.playCard(pick);
+      if (state.phase === 'over') break;
+      endPlayerTurn(state);
     }
-    return { screen: SCREEN_PLAY };
   }
-  if (name === 'win') {
-    duel.startDuel();
-    playUntil(duel, true, () => false);
-    return { screen: duel.state.phase === PHASE_WON ? SCREEN_WON : SCREEN_PLAY };
+  // Fallback staging (never hit in practice): point the chain at hand[0].
+  const state = createGame(seed);
+  if (state.you.hand.length > 0) state.you.lastSuit = state.you.hand[0].suit;
+  return {
+    state,
+    announce: { text: '✦ RESONANCE +2 ✦', until: Number.POSITIVE_INFINITY },
+  };
+}
+
+function buildWin(seed) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const state = createGame(seed + attempt * 1000);
+    for (let round = 0; round < 60 && state.phase !== 'over'; round++) {
+      for (;;) {
+        const pick = pickDamageCard(state);
+        if (pick === -1) break;
+        playCard(state, 'you', pick);
+        if (state.phase === 'over') break;
+      }
+      if (state.phase === 'over') break;
+      endPlayerTurn(state);
+    }
+    if (state.phase === 'over' && state.winner === 'you') return { state, announce: null };
   }
-  if (name === 'loss') {
-    duel.startDuel();
-    playUntil(duel, false, () => false);
-    return { screen: duel.state.phase === PHASE_LOST ? SCREEN_LOST : SCREEN_PLAY };
+  const state = createGame(seed);
+  dealDamage(state, 'foe', state.foe.life + state.foe.shield + 50);
+  return { state, announce: null };
+}
+
+function buildLoss(seed) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const state = createGame(seed + attempt * 1000);
+    // A passive Warden: never plays a card, just ends the turn. Cinder wins.
+    for (let round = 0; round < 80 && state.phase !== 'over'; round++) {
+      endPlayerTurn(state);
+    }
+    if (state.phase === 'over' && state.winner === 'foe') return { state, announce: null };
   }
-  duel.reset();
-  return { screen: SCREEN_TITLE };
+  const state = createGame(seed);
+  dealDamage(state, 'you', state.you.life + state.you.shield + 50);
+  return { state, announce: null };
+}
+
+/**
+ * Build a staged scene. Returns { state, announce } ready to render, or a
+ * title pseudo-state for the title screen.
+ */
+export function prepareShot(scene, seed) {
+  if (scene === 'title') return { state: { phase: 'title' }, announce: null };
+  if (scene === 'table') return buildTable(seed);
+  if (scene === 'win') return buildWin(seed);
+  if (scene === 'loss') return buildLoss(seed);
+  return buildTable(seed);
 }

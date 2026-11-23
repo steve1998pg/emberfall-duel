@@ -23,7 +23,10 @@ Play cards, chain suits, and reduce Cinder to 0 life before yours burns out.
 | **Stone** | amber square | Grants shield, which soaks damage first |
 
 **Resonance:** play two cards of the same suit in one turn and the second hits **+2**
-harder. That is the whole mind game: spend ember now for a combo, or hold it and shield.
+harder. The hint is on the table before you choose: while it is your turn, every
+card in hand whose suit matches the last suit you played gets a gold glow ring and
+a small "✦ RESONANCE" tag underneath. That is the whole mind game: spend ember now
+for a combo, or hold it and shield.
 
 **The rival reads you back:** Cinder goes for the kill when it can, patches itself up
 when hurt, and draws when its hand runs thin — so you can see its plan coming and answer it.
@@ -31,7 +34,7 @@ when hurt, and draws when its hand runs thin — so you can see its plan coming 
 ## How to play
 
 - **Mouse:** click a card to play it, click **END TURN** to pass.
-- **Keyboard:** `1`–`7` play a card, `E` or `Enter` ends your turn, `Space` starts a duel.
+- **Keyboard:** `1`–`9` play a card, `E` ends your turn, `Space` starts a duel.
 - Each round refills your ember (round + 2, up to 10) and both duelists draw 2 cards.
 - A deck that runs out does not come back: every card that cannot be drawn burns 2 life,
   so no duel can turtle forever — and no dead ends, the cards in hand still play.
@@ -41,7 +44,7 @@ when hurt, and draws when its hand runs thin — so you can see its plan coming 
 
 ```sh
 node serve.ts
-# open http://localhost:8080
+# open http://localhost:8080/game/index.html
 ```
 
 No build step, no network request, no library: `game/index.html` and its ES modules
@@ -52,8 +55,9 @@ under `game/src/` are the whole game. Sounds are synthesised with WebAudio.
 - `game/` — the playable game as static files
   - `game/src/config.js` — tuning, palette, suits
   - `game/src/cards.js` — the 40-card catalogue
+  - `game/src/random.js` — seeded RNG, so a duel replays from its seed
   - `game/src/duel.js` — rules, turns, ember, Resonance, the rival's brain
-  - `game/src/render.js` — table, cards, life bars, screens, flourishes
+  - `game/src/render.js` — table, cards, life bars, screens, Resonance hints
   - `game/src/input.js` — mouse and keyboard
   - `game/src/audio.js` — synthesised sound
   - `game/src/shots.js` — deterministic screenshot scenes (`?shot=title|table|win|loss`)

@@ -1,52 +1,80 @@
-// Every tuning number, colour and suit in one place. The table is a fixed 1280x720 logical
-// area; the renderer scales it to the window, so no rule below depends on the screen size.
-// Suits are told apart by colour AND shape, never by text alone: Flame is a red triangle,
-// Tide a blue drop, Gale a green diamond, Stone an amber square.
+// Tuning, palette and suits for Emberfall Duel. Everything the rules and
+// the renderer agree on lives here, so a balance tweak is one edit.
 
-export const FIELD = { width: 1280, height: 720 };
-
-export const DUEL = {
-  maxHp: 30,
-  openingHand: 4,
+export const TUNE = {
+  startLife: 30,
+  maxLife: 30,
+  startHand: 5,
+  deckSize: 40,
   drawPerRound: 2,
-  handCap: 7,
-  emberBase: 2,
-  emberCap: 10,
+  maxEmber: 10,
+  // Ember refills to round + 2 each round (round 1 -> 3 ember).
+  emberForRound: (round) => Math.min(10, round + 2),
+  // Playing a card whose suit matches the last suit you played this turn.
   resonanceBonus: 2,
-  aiCardsPerTurn: 3,
+  // Life lost for each card that cannot be drawn from an empty deck.
+  burnDamage: 2,
+  // How long the "RESONANCE +2" banner stays on screen (ms).
+  announceMs: 1600,
 };
 
-export const CARD = { width: 150, height: 208, radius: 12 };
-export const FOE_CARD = { width: 86, height: 120, radius: 8 };
-
+// The four suits. `glyph` is the shape drawn on the card; `color` the suit
+// colour, `dark` its shaded edge, `light` the glow used for Resonance hints.
 export const SUITS = {
-  flame: { name: 'Flame', color: '#e5534b', dark: '#8f1f1a', light: '#ff8a7a', shape: 'triangle', verb: 'Deal' },
-  tide: { name: 'Tide', color: '#4aa3df', dark: '#174a75', light: '#8ecdf5', shape: 'drop', verb: 'Heal' },
-  gale: { name: 'Gale', color: '#58b368', dark: '#1e5c2e', light: '#93d9a0', shape: 'diamond', verb: 'Draw 2, deal' },
-  stone: { name: 'Stone', color: '#e0a63c', dark: '#7a5410', light: '#f4cd7d', shape: 'square', verb: 'Shield' },
+  flame: {
+    key: 'flame',
+    name: 'Flame',
+    glyph: 'triangle',
+    color: '#e5484d',
+    dark: '#8f1d22',
+    light: '#ff8a7a',
+    does: 'Deals damage',
+  },
+  tide: {
+    key: 'tide',
+    name: 'Tide',
+    glyph: 'drop',
+    color: '#3e9bff',
+    dark: '#144a8a',
+    light: '#8ec9ff',
+    does: 'Heals your life',
+  },
+  gale: {
+    key: 'gale',
+    name: 'Gale',
+    glyph: 'diamond',
+    color: '#43b581',
+    dark: '#1d6b45',
+    light: '#8fe3b8',
+    does: 'Draw 2, deal a little',
+  },
+  stone: {
+    key: 'stone',
+    name: 'Stone',
+    glyph: 'square',
+    color: '#e8a33d',
+    dark: '#8a5a12',
+    light: '#ffcf7d',
+    does: 'Shield soaks damage',
+  },
 };
+
+export const SUIT_KEYS = ['flame', 'tide', 'gale', 'stone'];
 
 export const PALETTE = {
-  felt: '#14261c',
-  feltDark: '#0d1a13',
-  table: '#1d3a2a',
-  tableEdge: '#c9a227',
-  panel: '#101b16',
-  panelEdge: '#2e4a3a',
-  text: '#f4efe2',
-  muted: '#a8b8a4',
-  gold: '#f2c94c',
-  ember: '#ff7a2f',
-  hp: '#e5534b',
-  hpBack: '#3a1512',
-  shield: '#8ecdf5',
-  button: '#c9a227',
-  buttonText: '#241a05',
-  danger: '#ff6b5e',
+  table: '#14532d',
+  tableDark: '#0c331b',
+  tableEdge: '#0a2a17',
+  feltLine: '#1e6b3a',
+  gold: '#f5c542',
+  goldDim: '#b98a1e',
+  cream: '#f7f0dc',
+  ink: '#241d12',
+  muted: '#8a8272',
+  panel: '#1c1408',
+  panelEdge: '#3d2f14',
+  aiRed: '#c0392b',
+  youTeal: '#2e8b74',
+  button: '#7c5cff',
+  buttonEdge: '#4b2fd6',
 };
-
-export const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
-
-/** Where wins and the fastest win are kept between visits (this browser only). */
-export const WINS_KEY = 'emberfall-duel.wins';
-export const BEST_ROUNDS_KEY = 'emberfall-duel.best-rounds';

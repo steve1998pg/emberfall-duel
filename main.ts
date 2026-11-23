@@ -1,37 +1,59 @@
-// Emberfall Duel — a make.fun best-card-game entry (Node 22, standard library only).
-//
-// The game is this directory's game/ folder: plain static files a desktop browser loads
-// offline (game/index.html and its ES modules, no library, no network request). This program
-// hands it in: it copies game/ and screenshots/ from beside this file to /output and writes
-// /output/dossier.json, the summary the judge reads, with the vendored make.fun library.
-//
-// Serve it locally with `node serve.ts`, then open http://localhost:8080.
-// Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
-//   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
-
-import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+// SPDX-License-Identifier: MIT
+// Emberfall Duel — the make.fun entrypoint. Run with `node main.ts` (Node 22+,
+// no flags, no build, no install). It hands the game in: copies game/ and
+// screenshots/ into /output and writes /output/dossier.json with the kit's
+// dossier library, so the dossier the scorer rebuilds is the dossier here.
 import { buildDossier } from './vendor/makefun-game.ts';
+import { createHash } from 'node:crypto';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { join } from 'node:path';
 
-const here = fileURLToPath(new URL('.', import.meta.url));
-const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+const OUT = '/output';
+const ROOT = process.cwd();
 
-mkdirSync(out, { recursive: true });
-cpSync(join(here, 'game'), join(out, 'game'), { recursive: true });
-mkdirSync(join(out, 'screenshots'), { recursive: true });
-if (existsSync(join(here, 'screenshots'))) cpSync(join(here, 'screenshots'), join(out, 'screenshots'), { recursive: true });
+// Drop a previous hand-in first, so a stale file can never survive into
+// this one: the dossier must describe exactly what is copied below.
+for (const stale of ['game', 'screenshots', 'dossier.json']) {
+  const path = join(OUT, stale);
+  if (existsSync(path)) rmSync(path, { recursive: true, force: true });
+}
 
-// The scorer's own caps: only text_max_bytes shapes the bytes; the others refuse an entry
-// the scorer would refuse (more than 4 screenshots or one over 256 KiB; more than 993 files
-// in game/ or 48 MiB of game files, in all, or a path under game/ over 1000 bytes).
-writeFileSync(
-  join(out, 'dossier.json'),
-  buildDossier(out, {
-    text_max_bytes: 163840,
-    screenshots: { max: 4, max_bytes: 262144 },
-    game_max_files: 993,
-    game_max_bytes: 50331648,
-    game_path_max_bytes: 1000,
-  }),
-);
+function copyTree(src: string, dest: string): number {
+  let files = 0;
+  mkdirSync(dest, { recursive: true });
+  for (const entry of readdirSync(src).sort()) {
+    const from = join(src, entry);
+    const to = join(dest, entry);
+    if (statSync(from).isDirectory()) {
+      files += copyTree(from, to);
+    } else {
+      cpSync(from, to);
+      files += 1;
+    }
+  }
+  return files;
+}
+
+const gameFiles = copyTree(join(ROOT, 'game'), join(OUT, 'game'));
+const shotFiles = copyTree(join(ROOT, 'screenshots'), join(OUT, 'screenshots'));
+
+const dossier = buildDossier(OUT, {
+  text_max_bytes: 163840,
+  screenshots: { max: 4, max_bytes: 262144 },
+  game_max_files: 993,
+  game_max_bytes: 50331648,
+});
+writeFileSync(join(OUT, 'dossier.json'), dossier);
+
+const sha256 = createHash('sha256').update(dossier).digest('hex');
+console.log(`game/: ${gameFiles} files`);
+console.log(`screenshots/: ${shotFiles} files`);
+console.log(`dossier.json: ${dossier.length} bytes, sha256 ${sha256}`);

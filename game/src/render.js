@@ -1,23 +1,17 @@
-// Everything the eye sees, and nothing the rules need: the green baize table, the two
-// life bars, the rival's face-down hand, your fanned hand, the card faces (cost, suit shape,
-// name, power, one line of rules), the title, victory and defeat screens, and the small
-// flourishes — floating damage numbers, ember bursts, drifting motes. The table is drawn in
-// a fixed 1280x720 logical space and scaled to the window, so a screenshot and a live game
-// look the same. Every suit is told by colour AND shape, so the cards read at thumbnail size.
-import { CARD, DUEL, FIELD, FOE_CARD, FONT, PALETTE, SUITS } from './config.js';
+// The table: everything the player sees, drawn on one canvas at a fixed
+// 1280x720 logical size. Suits are told apart by colour AND shape. The
+// Resonance hint is drawn BEFORE the player chooses: while it is the
+// player's turn, every hand card whose suit matches state.you.lastSuit gets
+// a gold glow ring and a small "✦ RESONANCE" tag under the card.
+import { PALETTE, SUITS, TUNE } from './config.js';
 import { suitOf } from './cards.js';
 
-export const SCREEN_TITLE = 'title';
-export const SCREEN_PLAY = 'play';
-export const SCREEN_WON = 'won';
-export const SCREEN_LOST = 'lost';
+export const VIEW_W = 1280;
+export const VIEW_H = 720;
 
-const HAND_Y = 470;
-const FOE_Y = 78;
-const STAGE = { x: 565, y: 222, w: 150, h: 208 };
-const END_BUTTON = { x: 1064, y: 600, w: 192, h: 56 };
+const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
 
-function roundRect(ctx, x, y, w, h, r) {
+export function roundRect(ctx, x, y, w, h, r) {
   ctx.beginPath();
   ctx.moveTo(x + r, y);
   ctx.arcTo(x + w, y, x + w, y + h, r);
@@ -27,492 +21,466 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
-/** The suit's shape: triangle, drop, diamond or square, centred on (cx, cy). */
-function drawSuitShape(ctx, shape, cx, cy, size, color) {
+function inRect(px, py, r) {
+  return px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h;
+}
+
+export function pointInRect(px, py, r) {
+  return inRect(px, py, r);
+}
+
+/** The on-screen rectangles of the player's hand cards, left to right.
+ *  The hand lives between the player panel (left) and the END TURN button
+ *  (right), and leaves room below for the Resonance tag. */
+export function handCardRects(state, hoverIndex = -1) {
+  const n = state.you.hand.length;
+  if (n === 0) return [];
+  const gap = 10;
+  const regionX = 300;
+  const regionW = 740;
+  const w = Math.min(112, Math.floor((regionW - (n - 1) * gap) / n));
+  const h = Math.floor((w * 150) / 112);
+  const total = n * w + (n - 1) * gap;
+  const startX = regionX + (regionW - total) / 2;
+  const baseY = VIEW_H - h - 45;
+  return state.you.hand.map((_, i) => ({
+    x: startX + i * (w + gap),
+    y: baseY - (i === hoverIndex ? 16 : 0),
+    w,
+    h,
+  }));
+}
+
+/** The END TURN button rectangle. */
+export function endTurnRect() {
+  return { x: VIEW_W - 218, y: VIEW_H - 64, w: 190, h: 46 };
+}
+
+/** The START button rectangle on the title screen. */
+export function startRect() {
+  return { x: VIEW_W / 2 - 130, y: 520, w: 260, h: 56 };
+}
+
+function drawGlyph(ctx, glyph, cx, cy, size, color) {
   ctx.fillStyle = color;
   ctx.beginPath();
-  if (shape === 'triangle') {
+  if (glyph === 'triangle') {
     ctx.moveTo(cx, cy - size);
-    ctx.lineTo(cx + size * 0.9, cy + size * 0.75);
-    ctx.lineTo(cx - size * 0.9, cy + size * 0.75);
-  } else if (shape === 'drop') {
-    ctx.moveTo(cx, cy - size);
-    ctx.quadraticCurveTo(cx + size, cy + size * 0.2, cx, cy + size * 0.9);
-    ctx.quadraticCurveTo(cx - size, cy + size * 0.2, cx, cy - size);
-  } else if (shape === 'diamond') {
+    ctx.lineTo(cx + size * 0.9, cy + size * 0.7);
+    ctx.lineTo(cx - size * 0.9, cy + size * 0.7);
+  } else if (glyph === 'diamond') {
     ctx.moveTo(cx, cy - size);
     ctx.lineTo(cx + size * 0.8, cy);
     ctx.lineTo(cx, cy + size);
     ctx.lineTo(cx - size * 0.8, cy);
+  } else if (glyph === 'square') {
+    ctx.rect(cx - size * 0.75, cy - size * 0.75, size * 1.5, size * 1.5);
   } else {
-    ctx.rect(cx - size * 0.8, cy - size * 0.8, size * 1.6, size * 1.6);
+    // drop
+    ctx.moveTo(cx, cy - size);
+    ctx.bezierCurveTo(cx + size * 0.9, cy - size * 0.1, cx + size * 0.75, cy + size * 0.8, cx, cy + size * 0.8);
+    ctx.bezierCurveTo(cx - size * 0.75, cy + size * 0.8, cx - size * 0.9, cy - size * 0.1, cx, cy - size);
   }
   ctx.closePath();
   ctx.fill();
 }
 
-export function createRenderer(canvas) {
-  const ctx = canvas.getContext('2d');
-  const floaters = [];
-  const bursts = [];
+function drawCardFace(ctx, card, rect, opts = {}) {
+  const { x, y, w, h } = rect;
+  const suit = suitOf(card);
+  const resonant = !!opts.resonant;
+  const affordable = opts.affordable !== false;
+  const hover = !!opts.hover;
 
-  /** A damage or heal number that rises and fades above the table. */
-  function spawnFloat(x, y, text, color) {
-    floaters.push({ x, y, text, color, t: 0, life: 1.1 });
-  }
-
-  /** A spray of ember sparks from a played card. */
-  function spawnBurst(x, y, color) {
-    for (let i = 0; i < 26; i += 1) {
-      const angle = (i / 26) * Math.PI * 2 + 0.3;
-      const speed = 60 + (i % 5) * 34;
-      bursts.push({ x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed - 40, color, t: 0, life: 0.7 + (i % 3) * 0.12 });
-    }
-  }
-
-  function updateEffects(dt) {
-    for (let i = floaters.length - 1; i >= 0; i -= 1) {
-      floaters[i].t += dt;
-      if (floaters[i].t >= floaters[i].life) floaters.splice(i, 1);
-    }
-    for (let i = bursts.length - 1; i >= 0; i -= 1) {
-      const p = bursts[i];
-      p.t += dt;
-      p.x += p.vx * dt;
-      p.y += p.vy * dt;
-      p.vy += 160 * dt;
-      if (p.t >= p.life) bursts.splice(i, 1);
-    }
-  }
-
-  /** Where each card of a hand of `count` sits, fanned around the table's centre. */
-  function playerHandLayout(count) {
-    const overlap = 18;
-    const total = count * CARD.width - (count - 1) * overlap;
-    const rects = [];
-    for (let i = 0; i < count; i += 1) {
-      const x = (FIELD.width - total) / 2 + i * (CARD.width - overlap);
-      const middle = (count - 1) / 2;
-      const tilt = (i - middle) * 0.028;
-      const lift = Math.abs(i - middle) * 3;
-      rects.push({ x, y: HAND_Y + lift, w: CARD.width, h: CARD.height, tilt });
-    }
-    return rects;
-  }
-
-  function foeHandLayout(count) {
-    const overlap = 30;
-    const total = count * FOE_CARD.width - Math.max(0, count - 1) * overlap;
-    const rects = [];
-    for (let i = 0; i < count; i += 1) {
-      rects.push({ x: (FIELD.width - total) / 2 + i * (FOE_CARD.width - overlap), y: FOE_Y, w: FOE_CARD.width, h: FOE_CARD.height, tilt: 0 });
-    }
-    return rects;
-  }
-
-  function drawCardFace(cardValue, x, y, w, h, options) {
-    const suit = suitOf(cardValue);
-    const scale = w / CARD.width;
-    ctx.save();
-    ctx.translate(x + w / 2, y + h / 2);
-    if (options.tilt) ctx.rotate(options.tilt);
-    ctx.translate(-w / 2, -h / 2);
-    roundRect(ctx, 0, 0, w, h, CARD.radius * scale);
-    ctx.fillStyle = '#f7f1de';
-    ctx.fill();
-    ctx.lineWidth = 3 * scale;
-    ctx.strokeStyle = options.disabled ? '#9a938a' : suit.color;
+  ctx.save();
+  if (resonant) {
+    // The Resonance hint: a gold glow ring around the whole card.
+    ctx.shadowColor = PALETTE.gold;
+    ctx.shadowBlur = 22;
+    ctx.strokeStyle = PALETTE.gold;
+    ctx.lineWidth = 5;
+    roundRect(ctx, x - 3, y - 3, w + 6, h + 6, 12);
     ctx.stroke();
-    // Suit band across the top.
-    ctx.fillStyle = suit.color;
-    roundRect(ctx, 0, 0, w, 34 * scale, CARD.radius * scale);
-    ctx.fillRect(0, 20 * scale, w, 14 * scale);
-    ctx.fillStyle = '#fff';
-    ctx.font = `bold ${13 * scale}px ${FONT}`;
+    ctx.shadowBlur = 0;
+  }
+  roundRect(ctx, x, y, w, h, 10);
+  ctx.fillStyle = affordable ? PALETTE.cream : '#cfc7b4';
+  ctx.fill();
+  ctx.lineWidth = hover ? 3 : 2;
+  ctx.strokeStyle = resonant ? PALETTE.gold : suit.dark;
+  ctx.stroke();
+
+  // Suit band across the top.
+  ctx.save();
+  roundRect(ctx, x, y, w, 34, 10);
+  ctx.clip();
+  ctx.fillStyle = suit.color;
+  ctx.fillRect(x, y, w, 34);
+  ctx.restore();
+  ctx.fillStyle = '#fff';
+  ctx.font = `bold ${Math.max(12, Math.floor(w * 0.11))}px ${FONT}`;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(suit.name.toUpperCase(), x + 10, y + 18);
+
+  // Ember cost, top right.
+  ctx.beginPath();
+  ctx.arc(x + w - 20, y + 17, 12, 0, Math.PI * 2);
+  ctx.fillStyle = '#ff7a2f';
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#7a2d05';
+  ctx.stroke();
+  ctx.fillStyle = '#fff';
+  ctx.font = `bold 15px ${FONT}`;
+  ctx.textAlign = 'center';
+  ctx.fillText(String(card.cost), x + w - 20, y + 18);
+
+  // Big suit glyph in the middle.
+  drawGlyph(ctx, suit.glyph, x + w / 2, y + h * 0.42, Math.min(26, w * 0.22), suit.color);
+  ctx.strokeStyle = suit.dark;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Name and rules text.
+  ctx.fillStyle = PALETTE.ink;
+  ctx.font = `bold ${Math.max(12, Math.floor(w * 0.115))}px ${FONT}`;
+  ctx.textAlign = 'center';
+  ctx.fillText(card.name, x + w / 2, y + h * 0.62, w - 12);
+  ctx.fillStyle = '#4a4232';
+  ctx.font = `${Math.max(10, Math.floor(w * 0.095))}px ${FONT}`;
+  const words = card.text.split(' ');
+  let line = '';
+  let ly = y + h * 0.74;
+  for (const word of words) {
+    const test = line ? `${line} ${word}` : word;
+    if (ctx.measureText(test).width > w - 16 && line) {
+      ctx.fillText(line, x + w / 2, ly);
+      ly += 14;
+      line = word;
+    } else {
+      line = test;
+    }
+  }
+  if (line) ctx.fillText(line, x + w / 2, ly);
+
+  if (resonant) {
+    // The tag under the card: the hint, in words, before the player chooses.
+    const tag = '✦ RESONANCE';
+    ctx.font = `bold 13px ${FONT}`;
+    const tw = ctx.measureText(tag).width + 18;
+    const tx = x + w / 2 - tw / 2;
+    const ty = y + h + 7;
+    roundRect(ctx, tx, ty, tw, 20, 10);
+    ctx.fillStyle = PALETTE.gold;
+    ctx.fill();
+    ctx.fillStyle = '#241a05';
+    ctx.fillText(tag, x + w / 2, ty + 11);
+  }
+  ctx.restore();
+}
+
+function drawCardBack(ctx, x, y, w, h) {
+  roundRect(ctx, x, y, w, h, 8);
+  ctx.fillStyle = '#5a1f1a';
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = PALETTE.goldDim;
+  ctx.stroke();
+  roundRect(ctx, x + 6, y + 6, w - 12, h - 12, 6);
+  ctx.strokeStyle = '#7a2d22';
+  ctx.stroke();
+  drawGlyph(ctx, 'triangle', x + w / 2, y + h / 2, Math.min(14, w * 0.2), '#e5484d');
+}
+
+function drawLifeBar(ctx, x, y, w, life, maxLife, shield, label, color) {
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  roundRect(ctx, x - 8, y - 8, w + 16, 52, 8);
+  ctx.fill();
+  ctx.fillStyle = PALETTE.cream;
+  ctx.font = `bold 15px ${FONT}`;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, x, y + 2);
+  ctx.fillStyle = '#3a1512';
+  roundRect(ctx, x, y + 14, w, 14, 7);
+  ctx.fill();
+  const frac = Math.max(0, life / maxLife);
+  if (frac > 0) {
+    ctx.fillStyle = color;
+    roundRect(ctx, x, y + 14, Math.max(14, w * frac), 14, 7);
+    ctx.fill();
+  }
+  ctx.fillStyle = PALETTE.cream;
+  ctx.font = `bold 13px ${FONT}`;
+  ctx.textAlign = 'right';
+  ctx.fillText(`${life} / ${maxLife}`, x + w, y + 2);
+  if (shield > 0) {
+    ctx.fillStyle = '#8ec9ff';
     ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(suit.name.toUpperCase(), 48 * scale, 17 * scale);
-    // Cost: a big number in a circle, top left over the band.
+    ctx.fillText(`Shield ${shield}`, x, y + 40);
+  }
+}
+
+function drawEmber(ctx, x, y, ember, maxEmber, label) {
+  ctx.fillStyle = PALETTE.cream;
+  ctx.font = `bold 14px ${FONT}`;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, x, y);
+  for (let i = 0; i < maxEmber; i++) {
+    const cx = x + 62 + i * 20;
     ctx.beginPath();
-    ctx.arc(26 * scale, 26 * scale, 17 * scale, 0, Math.PI * 2);
-    ctx.fillStyle = options.disabled ? '#8a8378' : suit.dark;
+    ctx.arc(cx, y, 7, 0, Math.PI * 2);
+    ctx.fillStyle = i < ember ? '#ff7a2f' : 'rgba(255,255,255,0.18)';
     ctx.fill();
-    ctx.lineWidth = 2 * scale;
-    ctx.strokeStyle = '#f7f1de';
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = i < ember ? '#7a2d05' : 'rgba(255,255,255,0.25)';
     ctx.stroke();
-    ctx.fillStyle = '#fff';
-    ctx.font = `bold ${20 * scale}px ${FONT}`;
+  }
+}
+
+function drawTable(ctx) {
+  ctx.fillStyle = PALETTE.tableDark;
+  ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+  ctx.fillStyle = PALETTE.table;
+  ctx.beginPath();
+  ctx.ellipse(VIEW_W / 2, VIEW_H / 2, 620, 330, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = PALETTE.feltLine;
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(245,197,66,0.25)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.ellipse(VIEW_W / 2, VIEW_H / 2, 560, 280, 0, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+function drawLog(ctx, lines) {
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const shown = lines.slice(-3);
+  shown.forEach((line, i) => {
+    ctx.font = `${i === shown.length - 1 ? 'bold ' : ''}15px ${FONT}`;
+    ctx.fillStyle = i === shown.length - 1 ? PALETTE.cream : 'rgba(247,240,220,0.6)';
+    ctx.fillText(line, VIEW_W / 2, 340 + i * 22, VIEW_W - 80);
+  });
+}
+
+function drawAnnouncement(ctx, announce, now) {
+  if (!announce || now >= announce.until) return;
+  ctx.save();
+  ctx.font = `bold 30px ${FONT}`;
+  const tw = ctx.measureText(announce.text).width + 48;
+  const tx = VIEW_W / 2 - tw / 2;
+  const ty = 252;
+  ctx.shadowColor = PALETTE.gold;
+  ctx.shadowBlur = 24;
+  roundRect(ctx, tx, ty, tw, 52, 12);
+  ctx.fillStyle = 'rgba(28,20,8,0.92)';
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = PALETTE.gold;
+  ctx.stroke();
+  ctx.fillStyle = PALETTE.gold;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(announce.text, VIEW_W / 2, ty + 27);
+  ctx.restore();
+}
+
+function drawTitleScreen(ctx, ui) {
+  drawTable(ctx);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = PALETTE.gold;
+  ctx.font = `bold 74px ${FONT}`;
+  ctx.fillText('EMBERFALL DUEL', VIEW_W / 2, 168);
+  ctx.fillStyle = PALETTE.cream;
+  ctx.font = '26px ' + FONT;
+  ctx.fillText('Ember Warden vs Cinder, the Ashbringer', VIEW_W / 2, 232);
+
+  // The four suits, drawn as glyphs.
+  const keys = ['flame', 'tide', 'gale', 'stone'];
+  keys.forEach((key, i) => {
+    const suit = SUITS[key];
+    const cx = VIEW_W / 2 - 210 + i * 140;
+    drawGlyph(ctx, suit.glyph, cx, 310, 26, suit.color);
+    ctx.fillStyle = PALETTE.cream;
+    ctx.font = `bold 16px ${FONT}`;
+    ctx.fillText(suit.name, cx, 352);
+    ctx.fillStyle = 'rgba(247,240,220,0.75)';
+    ctx.font = '13px ' + FONT;
+    ctx.fillText(suit.does, cx, 376, 130);
+  });
+
+  ctx.fillStyle = PALETTE.cream;
+  ctx.font = '17px ' + FONT;
+  ctx.fillText('Chain the same suit twice in a turn for ✦ Resonance +2 ✦. Reduce Cinder to 0 life to win.', VIEW_W / 2, 438);
+  ctx.fillStyle = 'rgba(247,240,220,0.75)';
+  ctx.font = '15px ' + FONT;
+  ctx.fillText('Mouse: click a card to play it · Keys 1–7 play a card, E ends your turn', VIEW_W / 2, 470);
+
+  const btn = startRect();
+  const hover = ui.mouseX >= 0 && inRect(ui.mouseX, ui.mouseY, btn);
+  roundRect(ctx, btn.x, btn.y, btn.w, btn.h, 12);
+  ctx.fillStyle = hover ? '#8d6bff' : PALETTE.button;
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = PALETTE.buttonEdge;
+  ctx.stroke();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 22px ' + FONT;
+  ctx.fillText('BEGIN THE DUEL', VIEW_W / 2, btn.y + 29);
+
+  ctx.fillStyle = 'rgba(247,240,220,0.55)';
+  ctx.font = '13px ' + FONT;
+  ctx.fillText('A complete turn-based card duel · 40-card decks · plays offline', VIEW_W / 2, 620);
+}
+
+function drawEndScreen(ctx, state, ui) {
+  const won = state.winner === 'you';
+  ctx.fillStyle = 'rgba(6,12,8,0.85)';
+  ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = won ? PALETTE.gold : '#ff6b5e';
+  ctx.font = 'bold 64px ' + FONT;
+  ctx.fillText(won ? 'VICTORY' : 'DEFEAT', VIEW_W / 2, 250);
+  ctx.fillStyle = PALETTE.cream;
+  ctx.font = '24px ' + FONT;
+  ctx.fillText(
+    won ? 'Cinder is defeated — the ember is yours.' : 'Your ember fades — Cinder takes the duel.',
+    VIEW_W / 2,
+    316,
+  );
+  ctx.font = '18px ' + FONT;
+  ctx.fillStyle = 'rgba(247,240,220,0.85)';
+  ctx.fillText(
+    `Rounds: ${state.round} · Cards played: ${state.stats.cardsPlayed} · Resonances: ${state.stats.resonanceCount} · Deck-burns: ${state.stats.burns}`,
+    VIEW_W / 2,
+    362,
+  );
+  const btn = startRect();
+  const hover = ui.mouseX >= 0 && inRect(ui.mouseX, ui.mouseY, btn);
+  roundRect(ctx, btn.x, btn.y - 20, btn.w, btn.h, 12);
+  ctx.fillStyle = hover ? '#8d6bff' : PALETTE.button;
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 22px ' + FONT;
+  ctx.fillText('PLAY AGAIN', VIEW_W / 2, btn.y + 9);
+  ctx.fillStyle = 'rgba(247,240,220,0.6)';
+  ctx.font = '14px ' + FONT;
+  ctx.fillText('Press Space or click PLAY AGAIN', VIEW_W / 2, 600);
+}
+
+function drawTableScreen(ctx, state, ui) {
+  drawTable(ctx);
+  const foe = state.foe;
+  const you = state.you;
+
+  // Cinder, top.
+  drawLifeBar(ctx, 36, 30, 260, foe.life, TUNE.maxLife, foe.shield, 'CINDER, THE ASHBRINGER', PALETTE.aiRed);
+  drawEmber(ctx, 36, 92, foe.ember, TUNE.maxEmber, 'Ember');
+  ctx.fillStyle = PALETTE.cream;
+  ctx.font = 'bold 14px ' + FONT;
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(`Deck: ${foe.deck.length} · Hand: ${foe.hand.length}`, VIEW_W - 36, 92);
+  // Cinder's hand, face down.
+  const foeW = 62;
+  const foeH = 86;
+  const foeTotal = foe.hand.length * foeW + (foe.hand.length - 1) * 8;
+  foe.hand.forEach((_, i) => {
+    drawCardBack(ctx, (VIEW_W - foeTotal) / 2 + i * (foeW + 8), 96, foeW, foeH);
+  });
+
+  // Round marker, turn line, announcement and log, centre — hidden once the
+  // duel is over, so the end screen owns the middle of the table.
+  if (state.phase !== 'over') {
+    ctx.fillStyle = PALETTE.cream;
+    ctx.font = 'bold 15px ' + FONT;
     ctx.textAlign = 'center';
-    ctx.fillText(String(cardValue.cost), 26 * scale, 27 * scale);
-    // The suit's shape, big in the middle.
-    drawSuitShape(ctx, suit.shape, w / 2, 92 * scale, 26 * scale, suit.color);
-    // Power: the number the card hits, heals or shields for.
-    ctx.fillStyle = '#241f16';
-    ctx.font = `bold ${34 * scale}px ${FONT}`;
-    ctx.fillText(String(cardValue.power), w / 2, 138 * scale);
-    // Name and the one line of rules.
-    ctx.font = `bold ${14.5 * scale}px ${FONT}`;
-    ctx.fillText(cardValue.name, w / 2, 164 * scale);
-    ctx.font = `${12 * scale}px ${FONT}`;
-    ctx.fillStyle = '#5c5546';
-    ctx.fillText(cardValue.text, w / 2, 186 * scale);
-    if (options.disabled) {
-      ctx.fillStyle = 'rgba(40, 36, 28, 0.45)';
-      roundRect(ctx, 0, 0, w, h, CARD.radius * scale);
-      ctx.fill();
-    }
-    ctx.restore();
+    ctx.fillText(`ROUND ${state.round}`, VIEW_W / 2, 200);
+    ctx.fillStyle = 'rgba(247,240,220,0.6)';
+    ctx.font = '14px ' + FONT;
+    const turnText =
+      state.phase === 'player'
+        ? 'Your turn — play a card, or end your turn'
+        : state.phase === 'ai'
+          ? 'Cinder is thinking…'
+          : '';
+    ctx.fillText(turnText, VIEW_W / 2, 226);
+    drawAnnouncement(ctx, ui.announce, ui.now);
+    drawLog(ctx, state.log);
   }
 
-  function drawCardBack(x, y, w, h) {
-    roundRect(ctx, x, y, w, h, FOE_CARD.radius);
-    ctx.fillStyle = '#1d3a2a';
+  // The player, bottom.
+  drawLifeBar(ctx, 36, VIEW_H - 96, 240, you.life, TUNE.maxLife, you.shield, 'EMBER WARDEN (YOU)', PALETTE.youTeal);
+  drawEmber(ctx, 36, VIEW_H - 34, you.ember, TUNE.maxEmber, 'Ember');
+  ctx.textAlign = 'right';
+  ctx.fillText(`Deck: ${you.deck.length} · Discard: ${you.discard.length}`, VIEW_W - 36, VIEW_H - 96);
+
+  // Resonance chain reminder, centred under the log: which suit would
+  // resonate right now.
+  if (state.phase === 'player' && you.lastSuit) {
+    const suit = SUITS[you.lastSuit];
+    ctx.fillStyle = PALETTE.gold;
+    ctx.font = 'bold 15px ' + FONT;
+    ctx.textAlign = 'center';
+    ctx.fillText(`Last played: ${suit.name} — a ${suit.name} card resonates +2`, VIEW_W / 2, 404);
+  } else if (state.phase === 'player') {
+    ctx.fillStyle = 'rgba(247,240,220,0.65)';
+    ctx.font = '15px ' + FONT;
+    ctx.textAlign = 'center';
+    ctx.fillText('Play any card — then chain its suit for Resonance +2', VIEW_W / 2, 404);
+  }
+
+  // END TURN button (not while the duel is over).
+  if (state.phase !== 'over') {
+    const end = endTurnRect();
+    const endHover = ui.mouseX >= 0 && inRect(ui.mouseX, ui.mouseY, end);
+    const endDisabled = state.phase !== 'player';
+    roundRect(ctx, end.x, end.y, end.w, end.h, 10);
+    ctx.fillStyle = endDisabled ? '#4a463c' : endHover ? '#8d6bff' : PALETTE.button;
     ctx.fill();
     ctx.lineWidth = 2;
-    ctx.strokeStyle = PALETTE.tableEdge;
+    ctx.strokeStyle = endDisabled ? '#33302a' : PALETTE.buttonEdge;
     ctx.stroke();
-    drawSuitShape(ctx, 'diamond', x + w / 2, y + h / 2, 16, PALETTE.gold);
-    ctx.beginPath();
-    ctx.arc(x + w / 2, y + h / 2, 5, 0, Math.PI * 2);
-    ctx.fillStyle = PALETTE.ember;
-    ctx.fill();
-  }
-
-  function drawLifeBar(x, y, w, label, side, alignRight) {
-    ctx.textAlign = alignRight ? 'right' : 'left';
-    ctx.textBaseline = 'alphabetic';
-    ctx.font = `bold 15px ${FONT}`;
-    ctx.fillStyle = PALETTE.text;
-    const labelX = alignRight ? x + w : x;
-    ctx.fillText(label, labelX, y - 8);
-    ctx.fillStyle = PALETTE.hpBack;
-    roundRect(ctx, x, y, w, 22, 6);
-    ctx.fill();
-    const fill = Math.max(0, (side.hp / DUEL.maxHp) * w);
-    if (fill > 0) {
-      ctx.fillStyle = side.hp <= 10 ? PALETTE.danger : PALETTE.hp;
-      roundRect(ctx, x, y, fill, 22, 6);
-      ctx.fill();
-    }
-    ctx.font = `bold 15px ${FONT}`;
-    ctx.fillStyle = '#fff';
+    ctx.fillStyle = endDisabled ? '#9a958a' : '#fff';
+    ctx.font = 'bold 19px ' + FONT;
     ctx.textAlign = 'center';
-    ctx.fillText(`${side.hp} / ${DUEL.maxHp}`, x + w / 2, y + 16);
-    if (side.shield > 0) {
-      ctx.textAlign = alignRight ? 'right' : 'left';
-      ctx.fillStyle = PALETTE.shield;
-      ctx.font = `bold 15px ${FONT}`;
-      ctx.fillText(`🛡 ${side.shield}`, alignRight ? x - 12 : x + w + 12, y + 16);
-    }
-    ctx.textAlign = 'left';
+    ctx.fillText('END TURN  (E)', end.x + end.w / 2, end.y + 24);
   }
 
-  function drawEmberPips(side) {
-    const label = `EMBER ${side.ember}/${side.emberMax}`;
-    ctx.font = `bold 16px ${FONT}`;
-    ctx.textAlign = 'center';
-    ctx.fillStyle = PALETTE.gold;
-    ctx.fillText(label, END_BUTTON.x + END_BUTTON.w / 2, END_BUTTON.y - 34);
-    for (let i = 0; i < side.emberMax; i += 1) {
-      const cx = END_BUTTON.x + 14 + i * 18;
-      const cy = END_BUTTON.y - 16;
-      drawSuitShape(ctx, 'diamond', cx, cy, 7, i < side.ember ? PALETTE.ember : '#3a4a3e');
-    }
-    ctx.textAlign = 'left';
-  }
+  // The player's hand, face up, with the Resonance hint on matching cards.
+  // Dimmed once the duel is over, so the end screen reads first.
+  if (state.phase === 'over') ctx.globalAlpha = 0.3;
+  const rects = handCardRects(state, ui.hoverIndex);
+  you.hand.forEach((card, i) => {
+    const resonant = state.phase === 'player' && you.lastSuit !== null && card.suit === you.lastSuit;
+    drawCardFace(ctx, card, rects[i], {
+      resonant,
+      hover: i === ui.hoverIndex,
+      affordable: state.phase === 'player' && card.cost <= you.ember,
+    });
+  });
+  ctx.globalAlpha = 1;
+}
 
-  function drawTable(state, timeSec) {
-    // Baize with a gold rim and a soft centre glow.
-    ctx.fillStyle = PALETTE.feltDark;
-    ctx.fillRect(0, 0, FIELD.width, FIELD.height);
-    const glow = ctx.createRadialGradient(640, 330, 60, 640, 330, 620);
-    glow.addColorStop(0, PALETTE.table);
-    glow.addColorStop(1, PALETTE.felt);
-    ctx.fillStyle = glow;
-    ctx.fillRect(0, 0, FIELD.width, FIELD.height);
-    ctx.strokeStyle = PALETTE.tableEdge;
-    ctx.lineWidth = 4;
-    ctx.strokeRect(10, 10, FIELD.width - 20, FIELD.height - 20);
-    // Drifting ember motes: pure functions of time, so a staged frame is repeatable.
-    for (let i = 0; i < 26; i += 1) {
-      const mx = ((i * 197 + timeSec * (9 + (i % 4) * 3)) % 1280);
-      const my = 700 - ((i * 131 + timeSec * (14 + (i % 3) * 6)) % 700);
-      ctx.globalAlpha = 0.16 + (i % 3) * 0.08;
-      ctx.fillStyle = i % 2 ? PALETTE.ember : PALETTE.gold;
-      ctx.beginPath();
-      ctx.arc(mx, my, 2 + (i % 3), 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1;
+/**
+ * Draw the whole game. `ui` carries the pointer, the hovered hand index, the
+ * current announcement and the clock: { mouseX, mouseY, hoverIndex, announce, now }.
+ */
+export function render(ctx, state, ui) {
+  ctx.clearRect(0, 0, VIEW_W, VIEW_H);
+  ctx.textBaseline = 'middle';
+  if (!state || state.phase === 'title') {
+    drawTitleScreen(ctx, ui);
+    return;
   }
-
-  function drawStage(state) {
-    // The middle of the table: the last card played, large, or the four suits waiting.
-    const play = state.lastPlay;
-    if (play) {
-      const suit = suitOf(play.card);
-      ctx.save();
-      ctx.shadowColor = suit.color;
-      ctx.shadowBlur = 26;
-      drawCardFace(play.card, STAGE.x, STAGE.y, STAGE.w, STAGE.h, {});
-      ctx.restore();
-      ctx.textAlign = 'center';
-      ctx.font = `bold 16px ${FONT}`;
-      ctx.fillStyle = play.side === 'you' ? PALETTE.gold : '#f0a8a0';
-      ctx.fillText(play.side === 'you' ? 'YOU PLAYED' : 'CINDER PLAYED', STAGE.x + STAGE.w / 2, STAGE.y - 12);
-      if (play.resonance) {
-        ctx.fillStyle = PALETTE.gold;
-        ctx.font = `bold 20px ${FONT}`;
-        ctx.fillText('✦ RESONANCE +2 ✦', STAGE.x + STAGE.w / 2, STAGE.y + STAGE.h + 26);
-      }
-      // The damage, heal or shield the card caused, as plain text beside it.
-      let line = '';
-      for (const event of play.events) {
-        if (event.type === 'damage') line = `-${event.life} life${event.soaked ? ` (${event.soaked} soaked)` : ''}`;
-        if (event.type === 'heal') line = `+${event.amount} life`;
-        if (event.type === 'shield') line = `+${event.amount} shield`;
-        if (event.type === 'draw') line = `Drew ${event.amount}`;
-      }
-      if (line) {
-        ctx.fillStyle = PALETTE.text;
-        ctx.font = `bold 18px ${FONT}`;
-        ctx.fillText(line, STAGE.x + STAGE.w / 2, STAGE.y + STAGE.h + (play.resonance ? 48 : 28));
-      }
-    } else {
-      ctx.textAlign = 'center';
-      ctx.fillStyle = PALETTE.muted;
-      ctx.font = `bold 17px ${FONT}`;
-      ctx.fillText('FOUR SUITS · ONE EMBER', 640, 250);
-      const suits = Object.values(SUITS);
-      for (let i = 0; i < suits.length; i += 1) {
-        drawSuitShape(ctx, suits[i].shape, 490 + i * 100, 300, 24, suits[i].color);
-        ctx.fillStyle = PALETTE.text;
-        ctx.font = `bold 14px ${FONT}`;
-        ctx.fillText(suits[i].name.toUpperCase(), 490 + i * 100, 340);
-        ctx.fillStyle = PALETTE.muted;
-        ctx.font = '13px ' + FONT;
-        ctx.fillText(suits[i].verb, 490 + i * 100, 360);
-      }
-    }
-    ctx.textAlign = 'left';
-  }
-
-  function drawPlay(state, ui, timeSec) {
-    drawTable(state, timeSec);
-    // Life bars: Cinder top left, you top right; the round between them.
-    drawLifeBar(24, 40, 300, 'CINDER · THE ASHBRINGER', state.foe, false);
-    drawLifeBar(956, 40, 300, 'YOU · EMBER WARDEN', state.you, true);
-    ctx.textAlign = 'center';
-    ctx.fillStyle = PALETTE.gold;
-    ctx.font = `bold 20px ${FONT}`;
-    ctx.fillText(`ROUND ${state.round}`, 640, 34);
-    ctx.fillStyle = PALETTE.muted;
-    ctx.font = '14px ' + FONT;
-    ctx.fillText(`Decks  ${state.you.deck.length} · ${state.foe.deck.length}`, 640, 56);
-    ctx.textAlign = 'left';
-    // The rival's hand, face down.
-    const foeRects = foeHandLayout(state.foe.hand.length);
-    for (const rect of foeRects) drawCardBack(rect.x, rect.y, rect.w, rect.h);
-    if (!ui.minimal) drawStage(state);
-    // Your hand, fanned; the hovered card lifts, unaffordable cards dim.
-    const rects = playerHandLayout(state.you.hand.length);
-    for (let i = 0; i < rects.length; i += 1) {
-      const rect = rects[i];
-      const hovered = ui.hoverIndex === i;
-      const y = hovered ? rect.y - 26 : rect.y;
-      drawCardFace(state.you.hand[i], rect.x, y, rect.w, rect.h, {
-        tilt: hovered ? 0 : rect.tilt,
-        disabled: state.phase === 'player' && state.you.hand[i].cost > state.you.ember,
-      });
-      // Resonance hint: on your turn, a card whose suit matches the last card you
-      // played earns +2 — ring it in gold and tag it, before you choose. The stage
-      // already announces Resonance after a card lands; this shows the same rule
-      // while the choice is still open.
-      if (state.phase === 'player' && state.you.lastSuit !== null && state.you.hand[i].suit === state.you.lastSuit) {
-        ctx.save();
-        ctx.translate(rect.x + rect.w / 2, y + rect.h / 2);
-        if (!hovered && rect.tilt) ctx.rotate(rect.tilt);
-        ctx.translate(-rect.w / 2, -rect.h / 2);
-        ctx.shadowColor = PALETTE.gold;
-        ctx.shadowBlur = 18;
-        ctx.lineWidth = 4;
-        ctx.strokeStyle = PALETTE.gold;
-        roundRect(ctx, -5, -5, rect.w + 10, rect.h + 10, 16);
-        ctx.stroke();
-        ctx.restore();
-        const label = '✦ RESONANCE';
-        ctx.font = `bold 11px ${FONT}`;
-        const tagW = ctx.measureText(label).width + 16;
-        const tagX = rect.x + rect.w / 2 - tagW / 2;
-        const tagY = y + rect.h - 9;
-        ctx.fillStyle = PALETTE.gold;
-        roundRect(ctx, tagX, tagY, tagW, 17, 8);
-        ctx.fill();
-        ctx.fillStyle = PALETTE.buttonText;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(label, rect.x + rect.w / 2, tagY + 9);
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'alphabetic';
-      }
-      if (hovered) {
-        ctx.font = `bold 13px ${FONT}`;
-        ctx.textAlign = 'center';
-        ctx.fillStyle = PALETTE.gold;
-        ctx.fillText(`[${i + 1}]`, rect.x + rect.w / 2, rect.y - 32);
-        ctx.textAlign = 'left';
-      }
-    }
-    // Ember pips and the End Turn button.
-    drawEmberPips(state.you);
-    const endHover = ui.endHover && state.phase === 'player';
-    ctx.fillStyle = state.phase === 'player' ? (endHover ? '#e3b93a' : PALETTE.button) : '#5c5546';
-    roundRect(ctx, END_BUTTON.x, END_BUTTON.y, END_BUTTON.w, END_BUTTON.h, 10);
-    ctx.fill();
-    ctx.fillStyle = state.phase === 'player' ? PALETTE.buttonText : '#cfc8b8';
-    ctx.font = `bold 19px ${FONT}`;
-    ctx.textAlign = 'center';
-    ctx.fillText(state.phase === 'player' ? 'END TURN  ⏎' : 'CINDER…', END_BUTTON.x + END_BUTTON.w / 2, END_BUTTON.y + 35);
-    ctx.textAlign = 'left';
-    // Turn hint: the last thing that happened, then how to play.
-    ctx.fillStyle = PALETTE.muted;
-    ctx.font = '13px ' + FONT;
-    ctx.textAlign = 'center';
-    const lastLine = state.log[state.log.length - 1] ?? '';
-    const hint = state.phase === 'player'
-      ? `${lastLine}   ·   Click a card to play it · keys 1–7 · E ends turn`
-      : lastLine;
-    ctx.fillText(hint, 640, 706);
-    ctx.textAlign = 'left';
-    // Floating numbers and sparks.
-    for (const floater of floaters) {
-      const progress = floater.t / floater.life;
-      ctx.globalAlpha = 1 - progress;
-      ctx.fillStyle = floater.color;
-      ctx.font = `bold 26px ${FONT}`;
-      ctx.textAlign = 'center';
-      ctx.fillText(floater.text, floater.x, floater.y - progress * 46);
-    }
-    ctx.globalAlpha = 1;
-    ctx.textAlign = 'left';
-    for (const p of bursts) {
-      const progress = p.t / p.life;
-      ctx.globalAlpha = 1 - progress;
-      ctx.fillStyle = p.color;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, 3.5 * (1 - progress * 0.5), 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-  }
-
-  function drawTitle(state, ui, timeSec) {
-    drawTable(state, timeSec);
-    // Four suit cards fanned behind the title.
-    const suits = Object.keys(SUITS);
-    for (let i = 0; i < suits.length; i += 1) {
-      const cardValue = { suit: suits[i], name: SUITS[suits[i]].name, cost: i + 1, power: (i + 1) * 2 + 1, text: SUITS[suits[i]].verb + '.' };
-      drawCardFace(cardValue, 415 + i * 130, 400, 120, 166, { tilt: (i - 1.5) * 0.06 });
-    }
-    ctx.textAlign = 'center';
-    ctx.fillStyle = PALETTE.gold;
-    ctx.font = `bold 92px ${FONT}`;
-    ctx.fillText('EMBERFALL', 640, 190);
-    ctx.fillStyle = PALETTE.text;
-    ctx.font = `bold 44px ${FONT}`;
-    ctx.fillText('— D U E L —', 640, 250);
-    ctx.fillStyle = PALETTE.muted;
-    ctx.font = '19px ' + FONT;
-    ctx.fillText('A duel of four suits. Outplay Cinder, the Ashbringer, before your ember burns out.', 640, 300);
-    ctx.fillText('Flame wounds · Tide mends · Gale draws · Stone shields — play two of a suit to spark Resonance +2.', 640, 328);
-    ctx.fillStyle = PALETTE.text;
-    ctx.font = 'bold 17px ' + FONT;
-    ctx.fillText('HOW TO PLAY', 640, 380);
-    ctx.fillStyle = PALETTE.muted;
-    ctx.font = '16px ' + FONT;
-    ctx.fillText('Each round refills your ember. Cards cost ember. Reduce Cinder to 0 life to win.', 640, 596);
-    const pulse = 0.65 + 0.35 * Math.sin(timeSec * 3);
-    ctx.globalAlpha = pulse;
-    ctx.fillStyle = PALETTE.gold;
-    ctx.font = `bold 24px ${FONT}`;
-    ctx.fillText('CLICK OR PRESS SPACE TO DUEL', 640, 646);
-    ctx.globalAlpha = 1;
-    if (ui.wins > 0) {
-      ctx.fillStyle = PALETTE.muted;
-      ctx.font = '15px ' + FONT;
-      ctx.fillText(`Duels won: ${ui.wins}${ui.bestRounds ? ` · fastest win in ${ui.bestRounds} rounds` : ''}`, 640, 682);
-    }
-    ctx.textAlign = 'left';
-  }
-
-  function drawEnd(state, ui, timeSec, won) {
-    // The dimmed table behind the result — no stage card or hint, so nothing collides
-    // with the big result text.
-    drawPlay(state, { hoverIndex: -1, endHover: false, minimal: true }, timeSec);
-    ctx.fillStyle = won ? 'rgba(20, 26, 12, 0.72)' : 'rgba(16, 14, 14, 0.78)';
-    ctx.fillRect(0, 0, FIELD.width, FIELD.height);
-    if (won) {
-      for (let i = 0; i < 40; i += 1) {
-        const angle = (i / 40) * Math.PI * 2;
-        const radius = 90 + ((timeSec * 40 + i * 37) % 260);
-        ctx.globalAlpha = 0.5;
-        ctx.fillStyle = i % 2 ? PALETTE.gold : PALETTE.ember;
-        ctx.beginPath();
-        ctx.arc(640 + Math.cos(angle) * radius, 300 + Math.sin(angle) * radius * 0.6, 3, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      ctx.globalAlpha = 1;
-    }
-    ctx.textAlign = 'center';
-    ctx.fillStyle = won ? PALETTE.gold : '#c9c2b8';
-    ctx.font = `bold 84px ${FONT}`;
-    ctx.fillText(won ? 'VICTORY' : 'DEFEAT', 640, 300);
-    ctx.fillStyle = PALETTE.text;
-    ctx.font = '22px ' + FONT;
-    ctx.fillText(won ? 'The ember is yours — Cinder bows out.' : 'Cinder, the Ashbringer, takes the ember.', 640, 348);
-    ctx.fillStyle = PALETTE.muted;
-    ctx.font = '18px ' + FONT;
-    ctx.fillText(
-      `Duel report — ${state.stats.rounds} rounds · ${state.stats.cardsPlayed} cards played · ${state.stats.damageDealt} damage dealt · ${state.you.hp} life left`,
-      640, 396,
-    );
-    const pulse = 0.65 + 0.35 * Math.sin(timeSec * 3);
-    ctx.globalAlpha = pulse;
-    ctx.fillStyle = PALETTE.gold;
-    ctx.font = `bold 22px ${FONT}`;
-    ctx.fillText(won ? 'SPACE — DUEL AGAIN' : 'SPACE — TRY AGAIN', 640, 452);
-    ctx.globalAlpha = 1;
-    ctx.textAlign = 'left';
-  }
-
-  /** Paint one frame. `screen` is title, play, won or lost; `ui` carries hover and records. */
-  function draw(state, screen, ui, timeSec) {
-    const scale = Math.min(canvas.width / FIELD.width, canvas.height / FIELD.height);
-    ctx.setTransform(scale, 0, 0, scale, (canvas.width - FIELD.width * scale) / 2, (canvas.height - FIELD.height * scale) / 2);
-    ctx.clearRect(0, 0, FIELD.width, FIELD.height);
-    if (screen === SCREEN_TITLE) drawTitle(state, ui, timeSec);
-    else if (screen === SCREEN_WON) drawEnd(state, ui, timeSec, true);
-    else if (screen === SCREEN_LOST) drawEnd(state, ui, timeSec, false);
-    else drawPlay(state, ui, timeSec);
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-  }
-
-  /** Fit the canvas to its window (device pixels), keeping the 1280x720 table. */
-  function resize() {
-    const ratio = window.devicePixelRatio || 1;
-    canvas.width = Math.floor(window.innerWidth * ratio);
-    canvas.height = Math.floor(window.innerHeight * ratio);
-  }
-
-  return {
-    draw,
-    resize,
-    updateEffects,
-    spawnFloat,
-    spawnBurst,
-    playerHandLayout,
-    foeHandLayout,
-    endButton: END_BUTTON,
-    stage: STAGE,
-  };
+  drawTableScreen(ctx, state, ui);
+  if (state.phase === 'over') drawEndScreen(ctx, state, ui);
 }
