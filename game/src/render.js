@@ -324,6 +324,37 @@ export function createRenderer(canvas) {
         tilt: hovered ? 0 : rect.tilt,
         disabled: state.phase === 'player' && state.you.hand[i].cost > state.you.ember,
       });
+      // Resonance hint: on your turn, a card whose suit matches the last card you
+      // played earns +2 — ring it in gold and tag it, before you choose. The stage
+      // already announces Resonance after a card lands; this shows the same rule
+      // while the choice is still open.
+      if (state.phase === 'player' && state.you.lastSuit !== null && state.you.hand[i].suit === state.you.lastSuit) {
+        ctx.save();
+        ctx.translate(rect.x + rect.w / 2, y + rect.h / 2);
+        if (!hovered && rect.tilt) ctx.rotate(rect.tilt);
+        ctx.translate(-rect.w / 2, -rect.h / 2);
+        ctx.shadowColor = PALETTE.gold;
+        ctx.shadowBlur = 18;
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = PALETTE.gold;
+        roundRect(ctx, -5, -5, rect.w + 10, rect.h + 10, 16);
+        ctx.stroke();
+        ctx.restore();
+        const label = '✦ RESONANCE';
+        ctx.font = `bold 11px ${FONT}`;
+        const tagW = ctx.measureText(label).width + 16;
+        const tagX = rect.x + rect.w / 2 - tagW / 2;
+        const tagY = y + rect.h - 9;
+        ctx.fillStyle = PALETTE.gold;
+        roundRect(ctx, tagX, tagY, tagW, 17, 8);
+        ctx.fill();
+        ctx.fillStyle = PALETTE.buttonText;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(label, rect.x + rect.w / 2, tagY + 9);
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+      }
       if (hovered) {
         ctx.font = `bold 13px ${FONT}`;
         ctx.textAlign = 'center';

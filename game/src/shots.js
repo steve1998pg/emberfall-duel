@@ -62,6 +62,25 @@ export function stageShot(name, duel) {
   if (name === 'table') {
     duel.startDuel();
     playUntil(duel, true, (d) => d.state.phase === PHASE_PLAYER && d.state.round >= 4);
+    // Play one card first: startRound() resets lastSuit, so a frame stopped right
+    // at the round's start would have no Resonance hint to show. Prefer a card
+    // whose suit still sits in the hand afterwards, so the gold ring lands on a
+    // real card and the frame shows the rule in action.
+    if (duel.state.phase === PHASE_PLAYER) {
+      const hand = duel.state.you.hand;
+      const counts = {};
+      for (const card of hand) counts[card.suit] = (counts[card.suit] ?? 0) + 1;
+      let pick = -1;
+      for (let i = 0; i < hand.length; i += 1) {
+        if (hand[i].cost <= duel.state.you.ember && counts[hand[i].suit] >= 2) { pick = i; break; }
+      }
+      if (pick === -1) {
+        for (let i = 0; i < hand.length; i += 1) {
+          if (hand[i].cost <= duel.state.you.ember) { pick = i; break; }
+        }
+      }
+      if (pick !== -1) duel.playCard(pick);
+    }
     return { screen: SCREEN_PLAY };
   }
   if (name === 'win') {
