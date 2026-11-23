@@ -14,10 +14,15 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const OUT = '/output';
-const ROOT = process.cwd();
+// The grader may point output elsewhere via MAKEFUN_OUTPUT_DIR; default
+// stays /output as the kit expects.
+const OUT = process.env.MAKEFUN_OUTPUT_DIR || '/output';
+// The grader runs `node /bot/main.ts` from an arbitrary cwd, so the game
+// tree must be located relative to this script, not process.cwd().
+const ROOT = dirname(fileURLToPath(import.meta.url));
 
 // Drop a previous hand-in first, so a stale file can never survive into
 // this one: the dossier must describe exactly what is copied below.
